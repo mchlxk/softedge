@@ -1,14 +1,11 @@
 #include <vector>
 #include <tuple>
 #include <functional>
+#include <string>
 
 #include <OpenImageIO/imageio.h>
 #include <OpenImageIO/imagebuf.h>
 #include <OpenImageIO/imagebufalgo.h>
-
-// https://openimageio.readthedocs.io/en/v2.5.11.0/imageinput.html
-
-constexpr int P_kernel_radius{10};
 
 inline bool can_be_in_kernel(int x, int y, int width, int height)
 {
@@ -38,27 +35,42 @@ inline void get_kernel(std::vector<coord_t>& outKernel, int x, int y, int width,
     }
 }
 
+void print_usage() { std::cerr << "USAGE: unpremult <input-image> <output-image> [kernel-radius]\n"; }
+
 int main(int argc, char* argv[], char* env[])
 {
-    if (argc != 3)
+    if (argc < 3 || argc > 4)
     {
-        std::cout << "USAGE: softedge <input-image> <output-image>\n";
+        print_usage();
         return 1;
+    }
+
+    int kernel_radius{ 1 };
+
+    if (argc == 4)
+    {
+        try {
+            kernel_radius = std::stoi(argv[3]);
+        }
+        catch (...) {
+            print_usage();
+            return 1;
+        }
     }
 
     const char* filenameIn = argv[1];
     const char* filenameOut = argv[2];
 
-    OIIO::ImageBuf input(filenameIn);
-    input.read();
-    const OIIO::ImageSpec& specIn = input.spec();
-    
+    OIIO::ImageBuf inputBuffer(filenameIn);
+    inputBuffer.read();
+    const OIIO::ImageSpec& specIn = inputBuffer.spec();
+
     std::unordered_map<std::string, OIIO::ImageBuf> channelBuffers;
 
     for (int channelIdx = 0; channelIdx < specIn.nchannels; ++channelIdx)
     {
         const std::string channelName = specIn.channelnames[channelIdx];
-        channelBuffers[channelName] = OIIO::ImageBufAlgo::channels(input, 1, channelIdx);
+        channelBuffers[channelName] = OIIO::ImageBufAlgo::channels(inputBuffer, 1, channelIdx);
     }
 
     if (!channelBuffers.count("R")
@@ -78,13 +90,6 @@ int main(int argc, char* argv[], char* env[])
     //////////////////////
     // buffer processing
 
-
-    //channelBuffers["R"] = OIIO::ImageBufAlgo::div(channelBuffers.at("R"), channelBuffers.at("A"));
-    //channelBuffers["R"] = OIIO::ImageBufAlgo::mul(channelBuffers.at("R"), channelBuffers.at("A"));
-    //channelBuffers["G"] = OIIO::ImageBufAlgo::mul(channelBuffers.at("G"), channelBuffers.at("A"));
-    //channelBuffers["B"] = OIIO::ImageBufAlgo::mul(channelBuffers.at("B"), channelBuffers.at("A"));
-
-    
     int width = channelBuffers.at("A").oriented_full_width();
     width = std::min(width, channelBuffers.at("R").oriented_full_width());
     width = std::min(width, channelBuffers.at("G").oriented_full_width());
@@ -95,23 +100,31 @@ int main(int argc, char* argv[], char* env[])
     height = std::min(height, channelBuffers.at("G").oriented_full_height());
     height = std::min(height, channelBuffers.at("B").oriented_full_height());
 
-    const std::size_t maxKernelSize = (1 + 2 * P_kernel_radius) * (1 + 2 * P_kernel_radius);
+    const std::size_t maxKernelSize = (1 + 2 * kernel_radius) * (1 + 2 * kernel_radius);
     std::vector<coord_t> kernel;
     kernel.reserve(maxKernelSize);
     std::vector<coord_t> relevantKernel;
     relevantKernel.reserve(maxKernelSize);
 
+    unsigned int progress{ 0 };
+    
     for (int y = 0; y < height; ++y)
     {
-        std::cout << "y: " << y << " ";
+        unsigned int progressUpdate = 10.f * float(y) / float(height);
+        if (progressUpdate != progress)
+        {
+            std::cout << 10 * (progress+1) << "%\n";
+            progress = progressUpdate;
+        }
+
         for (int x = 0; x < width; ++x)
         {
-            get_kernel(kernel, x, y, width, height, P_kernel_radius);
+            get_kernel(kernel, x, y, width, height, kernel_radius);
 
             if (!kernel.size())
                 continue;
-            
-            float alphaOld{0.f};
+
+            float alphaOld{ 0.f };
             channelBuffers.at("A").getpixel(x, y, &alphaOld, 1);
 
             if (!(alphaOld < 1.f))
@@ -121,16 +134,16 @@ int main(int argc, char* argv[], char* env[])
             relevantKernel.clear();
             for (const auto& coord : kernel)
             {
-                float alphaRead{0.f};
+                float alphaRead{ 0.f };
                 channelBuffers.at("A").getpixel(coord.first, coord.second, &alphaRead, 1);
                 alphaSum += alphaRead;
-            
+
                 if (alphaRead > 0.f)
                     relevantKernel.push_back(coord);
             }
 
             const float alphaNew = alphaSum / float(kernel.size());
-            
+
             if (alphaNew == alphaOld)
                 continue;
 
@@ -166,24 +179,6 @@ int main(int argc, char* argv[], char* env[])
     }
 
 
-    /*
-    for (OIIO::ImageBuf::Iterator<uint8_t> it(channelBuffers.at("A")); !it.done(); ++it)
-    {
-        if (!it.exists())   // Make sure the iterator is pointing
-            continue;        //   to a pixel in the data window
-
-        if (it[0] < .5f)
-            it[0] = 0;
-        else
-            it[0] = 1.f;
-
-        //if (it[0] > 0)
-        //    std::cout << it[0] << " ";
-
-    }
-    */
-
-
     // buffer processing
     //////////////////////
 
@@ -199,7 +194,7 @@ int main(int argc, char* argv[], char* env[])
 
 
     OIIO::ImageBuf output;
-    
+
     for (int channelIdx = 0; channelIdx < specIn.nchannels; ++channelIdx)
     {
         const std::string channelName = specIn.channelnames[channelIdx];
