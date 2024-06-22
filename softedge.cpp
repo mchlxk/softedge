@@ -8,9 +8,9 @@
 
 // https://openimageio.readthedocs.io/en/v2.5.11.0/imageinput.html
 
-constexpr int P_kernel_size{1};
+constexpr int P_kernel_radius{10};
 
-bool can_be_in_kernel(int x, int y, int width, int height)
+inline bool can_be_in_kernel(int x, int y, int width, int height)
 {
     if (x < 0)
         return false;
@@ -23,20 +23,20 @@ bool can_be_in_kernel(int x, int y, int width, int height)
     return true;
 }
 
-std::vector<std::pair<int, int>> get_kernel(int x, int y, int width, int height, int kernel_size)
+using coord_t = std::pair<int, int>;
+
+inline void get_kernel(std::vector<coord_t>& outKernel, int x, int y, int width, int height, int kernel_radius)
 {
-    std::vector<std::pair<int, int>> kernel;
-    for (int h_offset = -kernel_size; h_offset <= kernel_size; ++h_offset)
+    outKernel.clear();
+    for (int h_offset = -kernel_radius; h_offset <= kernel_radius; ++h_offset)
     {
-        for (int v_offset = -kernel_size; v_offset <= kernel_size; ++v_offset)
+        for (int v_offset = -kernel_radius; v_offset <= kernel_radius; ++v_offset)
         {
             if (can_be_in_kernel(x + h_offset, y + v_offset, width, height))
-                kernel.emplace_back(x + h_offset, y + v_offset);
+                outKernel.emplace_back(x + h_offset, y + v_offset);
         }
     }
-    return kernel;
 }
-
 
 int main(int argc, char* argv[], char* env[])
 {
@@ -95,40 +95,48 @@ int main(int argc, char* argv[], char* env[])
     height = std::min(height, channelBuffers.at("G").oriented_full_height());
     height = std::min(height, channelBuffers.at("B").oriented_full_height());
 
+    const std::size_t maxKernelSize = (1 + 2 * P_kernel_radius) * (1 + 2 * P_kernel_radius);
+    std::vector<coord_t> kernel;
+    kernel.reserve(maxKernelSize);
+    std::vector<coord_t> relevantKernel;
+    relevantKernel.reserve(maxKernelSize);
 
     for (int y = 0; y < height; ++y)
     {
         std::cout << "y: " << y << " ";
         for (int x = 0; x < width; ++x)
         {
-            const auto kernel = get_kernel(x, y, width, height, P_kernel_size);
+            get_kernel(kernel, x, y, width, height, P_kernel_radius);
 
             if (!kernel.size())
                 continue;
             
-            float oldAlpha{0.f};
-            channelBuffers.at("A").getpixel(x, y, &oldAlpha, 1);
+            float alphaOld{0.f};
+            channelBuffers.at("A").getpixel(x, y, &alphaOld, 1);
+
+            if (!(alphaOld < 1.f))
+                continue;
 
             float alphaSum{ 0.f };
-            std::vector<std::pair<int, int>> relevantKernel;
+            relevantKernel.clear();
             for (const auto& coord : kernel)
             {
-                float alpha{0.f};
-                channelBuffers.at("A").getpixel(coord.first, coord.second, &alpha, 1);
-                alphaSum += alpha;
+                float alphaRead{0.f};
+                channelBuffers.at("A").getpixel(coord.first, coord.second, &alphaRead, 1);
+                alphaSum += alphaRead;
             
-                if (alpha > 0.f)
+                if (alphaRead > 0.f)
                     relevantKernel.push_back(coord);
             }
 
-            const float newAlpha = alphaSum / float(kernel.size());
+            const float alphaNew = alphaSum / float(kernel.size());
             
-            if (newAlpha == oldAlpha)
+            if (alphaNew == alphaOld)
                 continue;
 
-            bufferNewA.setpixel(x, y, &newAlpha, 1);
+            bufferNewA.setpixel(x, y, &alphaNew, 1);
 
-            if (oldAlpha > 0.f)
+            if (alphaOld > 0.f)
                 continue;
 
             float sumRelevantR{ 0.f };
@@ -137,14 +145,13 @@ int main(int argc, char* argv[], char* env[])
 
             for (const auto& coord : relevantKernel)
             {
-                float value{ 0.f };
-
-                channelBuffers.at("R").getpixel(coord.first, coord.second, &value, 1);
-                sumRelevantR += value;
-                channelBuffers.at("G").getpixel(coord.first, coord.second, &value, 1);
-                sumRelevantG += value;
-                channelBuffers.at("B").getpixel(coord.first, coord.second, &value, 1);
-                sumRelevantB += value;
+                float valueRead{ 0.f };
+                channelBuffers.at("R").getpixel(coord.first, coord.second, &valueRead, 1);
+                sumRelevantR += valueRead;
+                channelBuffers.at("G").getpixel(coord.first, coord.second, &valueRead, 1);
+                sumRelevantG += valueRead;
+                channelBuffers.at("B").getpixel(coord.first, coord.second, &valueRead, 1);
+                sumRelevantB += valueRead;
             }
 
             const float newR = sumRelevantR / float(relevantKernel.size());
